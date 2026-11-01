@@ -1,3 +1,4 @@
+import json
 import logging
 import sys
 
@@ -8,6 +9,7 @@ from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
 from pydantic import ValidationError
 
+import data
 from schemas import TOOLS
 
 logging.basicConfig(
@@ -17,6 +19,13 @@ logging.basicConfig(
 )
 log = logging.getLogger("customer-mcp")
 
+def tool_result(payload: dict, is_error: bool = False) -> types.CallToolResult:
+    """Wrap a dict as a tool result: readable text for the LLM, plus the raw structured data."""
+    return types.CallToolResult(
+        content=[types.TextContent(type="text", text=json.dumps(payload, indent=2))],
+        structuredContent=payload,
+        isError=is_error,
+    )
 
 async def list_tools(ctx, params) -> types.ListToolsResult:
     log.info("tools/list requested")
@@ -55,13 +64,32 @@ async def call_tool(ctx, params: types.CallToolRequestParams) -> types.CallToolR
             data={"errors": errors},
         ) from None
 
-    # 3. Placeholder: the real tool logic arrives in Step 6.
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=f"Arguments OK: {args.model_dump()}")]
-    )
+    # 3. Run the tool.
+    try:
+        if params.name == "get_customer_record":
+            return tool_result(data.get_customer(args.customer_id))
+
+        if params.name == "trigger_refund":
+            refund = data.create_refund(args.customer_id, args.amount, args.reason)
+            log.info("refund %s issued: %s %.2f", refund["refund_id"], args.customer_id, args.amount)
+            return tool_result(refund)
+
+    # Valid request, but the action failed   -> normal result with isError=true
+    except (data.CustomerNotFound, data.RefundRejected) as exc:
+        log.info("tool %s failed: %s", params.name, exc)
+        return tool_result({"error": str(exc)}, is_error=True)
+
+    # A bug in our code                      -> JSON-RPC error -32603, details only in the log
+    except Exception:
+        log.exception("unexpected error in tool %s", params.name)
+        raise MCPError(code=types.INTERNAL_ERROR, message="Internal server error") from None
+
+    # Only reachable if a tool is in TOOLS but has no branch above.
+    log.error("tool %s is listed but not implemented", params.name)
+    raise MCPError(code=types.INTERNAL_ERROR, message="Internal server error")
 
 
-server = Server("customer-mcp", version="0.1.0", on_list_tools=list_tools, on_call_tool=call_tool)
+server = Server("customer-mcp", version="1.0.0", on_list_tools=list_tools, on_call_tool=call_tool)
 
 
 async def main():
