@@ -95,7 +95,12 @@ server = Server("customer-mcp", version="1.0.0", on_list_tools=list_tools, on_ca
 async def main():
     log.info("server starting on stdio")
     async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+        try:
+            await server.run(read_stream, write_stream, server.create_initialization_options())
+        finally:
+            # While serving, the SDK points stdout at stderr. Flush any buffered stray
+            # print() output now, before the SDK restores the real stdout on exit.
+            sys.stdout.flush()
 
 
 if __name__ == "__main__":
