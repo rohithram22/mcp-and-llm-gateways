@@ -74,4 +74,4 @@ server = Server("mock-downstream-mcp", version="1.0.0", on_list_tools=list_tools
 app = server.streamable_http_app(json_response=os.environ.get("MOCK_SSE") != "1")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=9000, log_level="warning")
+    uvicorn.run(app, host="127.0.0.1", port=int(os.environ.get("MOCK_PORT", "9000")), log_level="warning")
