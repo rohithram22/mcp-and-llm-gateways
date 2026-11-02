@@ -58,6 +58,14 @@ def _safe_id(message) -> str | int | None:
     return None
 
 
+def request_id_or_none(body: bytes) -> str | int | None:
+    """Best-effort id of a body, for error replies built outside check_request."""
+    try:
+        return _safe_id(json.loads(body))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+
 def _reject(http_status: int, msg_id, code: int, message: str, reason: str, data: dict | None = None) -> Rejection:
     error = {"code": code, "message": message}
     if data is not None:
