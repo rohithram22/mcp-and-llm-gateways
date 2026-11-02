@@ -1,0 +1,53 @@
+"""MCP Security Gateway: a reverse proxy in front of a downstream MCP server.
+
+Run:  python task2-mcp-gateway/gateway.py      -> http://127.0.0.1:8000/mcp
+"""
+
+import logging
+import os
+import sys
+from contextlib import asynccontextmanager
+
+import httpx
+import uvicorn
+from fastapi import FastAPI, Request, Response
+
+logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("mcp-gateway")
+
+DOWNSTREAM_URL = os.environ.get("DOWNSTREAM_URL", "http://127.0.0.1:9000/mcp")
+
+# Only these headers are passed between client and downstream. Everything else
+# (Host, cookies, and above all the client's Authorization token) stays at the gateway.
+FORWARD_REQUEST_HEADERS = {"content-type", "accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"}
+FORWARD_RESPONSE_HEADERS = {"content-type", "mcp-session-id"}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # One shared HTTP client for the whole app: it reuses connections to the downstream.
+    app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0))
+    yield
+    await app.state.http.aclose()
+
+
+app = FastAPI(title="MCP Security Gateway", lifespan=lifespan)
+
+
+async def forward(request: Request, body: bytes) -> Response:
+    """Send the request to the downstream server and relay its reply unchanged."""
+    headers = {k: v for k, v in request.headers.items() if k.lower() in FORWARD_REQUEST_HEADERS}
+    upstream = await request.app.state.http.request(request.method, DOWNSTREAM_URL, content=body, headers=headers)
+    reply_headers = {k: v for k, v in upstream.headers.items() if k.lower() in FORWARD_RESPONSE_HEADERS}
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=reply_headers)
+
+
+@app.api_route("/mcp", methods=["POST", "GET", "DELETE"])
+async def mcp_endpoint(request: Request) -> Response:
+    body = await request.body()
+    log.info("%s /mcp (%d bytes)", request.method, len(body))
+    return await forward(request, body)
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="warning")
