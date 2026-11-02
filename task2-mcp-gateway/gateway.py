@@ -11,6 +11,9 @@ from contextlib import asynccontextmanager
 import httpx
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
+
+from auth import AuthError, authenticate
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("mcp-gateway")
@@ -42,10 +45,26 @@ async def forward(request: Request, body: bytes) -> Response:
     return Response(content=upstream.content, status_code=upstream.status_code, headers=reply_headers)
 
 
+def unauthorized() -> JSONResponse:
+    """HTTP 401. Deliberately vague: the exact reason is logged, not sent to the caller."""
+    return JSONResponse(
+        status_code=401,
+        content={"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "Unauthorized: missing, invalid or expired bearer token"}},
+        headers={"WWW-Authenticate": 'Bearer realm="mcp-gateway"'},
+    )
+
+
 @app.api_route("/mcp", methods=["POST", "GET", "DELETE"])
 async def mcp_endpoint(request: Request) -> Response:
+    # 1. Authenticate FIRST, before reading or parsing the body.
+    try:
+        principal = authenticate(request.headers.get("authorization"))
+    except AuthError as exc:
+        log.warning("401 %s /mcp: %s", request.method, exc)
+        return unauthorized()
+
     body = await request.body()
-    log.info("%s /mcp (%d bytes)", request.method, len(body))
+    log.info("%s /mcp user=%s role=%s (%d bytes)", request.method, principal.subject, principal.role, len(body))
     return await forward(request, body)
 
 
