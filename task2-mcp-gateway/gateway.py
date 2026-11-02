@@ -3,6 +3,7 @@
 Run:  python task2-mcp-gateway/gateway.py      -> http://127.0.0.1:8000/mcp
 """
 
+import json
 import logging
 import os
 import sys
@@ -14,6 +15,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from auth import AuthError, authenticate
+from policy import check_message
 
 logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("mcp-gateway")
@@ -65,6 +67,20 @@ async def mcp_endpoint(request: Request) -> Response:
 
     body = await request.body()
     log.info("%s /mcp user=%s role=%s (%d bytes)", request.method, principal.subject, principal.role, len(body))
+
+    # 2. Authorize: inspect the JSON-RPC message (POST bodies only; GET/DELETE have none).
+    if request.method == "POST":
+        message = json.loads(body)
+        if isinstance(message, dict):
+            denial = check_message(principal, message)
+            if denial is not None:
+                log.warning(
+                    "-32001 blocked tools/call name=%r for user=%s role=%s",
+                    message["params"]["name"], principal.subject, principal.role,
+                )
+                return JSONResponse(content=denial)  # answered here: the downstream never sees it
+
+    # 3. Allowed: forward unchanged.
     return await forward(request, body)
 
 
