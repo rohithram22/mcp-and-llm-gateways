@@ -33,6 +33,14 @@ REPLIES = {
 }
 DEFAULT_REPLY = REPLIES["mixed"]
 
+# Failure modes, also chosen by keyword, so the gateway's error handling can be exercised.
+#   fail500  -> HTTP 500 whose body leaks internal details (the gateway must not pass them on)
+#   rate429  -> HTTP 429 Too Many Requests
+#   cutoff   -> streams part of the SSN reply, then the connection breaks mid-SSN
+#   garbage  -> one malformed event in the middle of the stream
+#   stall    -> streams a little, then goes silent for 5 s
+FAILURES = ("fail500", "rate429", "cutoff", "garbage", "stall")
+
 app = FastAPI(title="Mock LLM provider")
 
 
@@ -53,11 +61,24 @@ def sse(data: str) -> bytes:
     return f"data: {data}\n\n".encode()
 
 
+def pick_failure(messages: list) -> str | None:
+    last = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
+    return next((f for f in FAILURES if f in str(last).lower()), None)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     payload = await request.json()
     model = payload.get("model", "mock-1")
     reply = pick_reply(payload.get("messages", []))
+    failure = pick_failure(payload.get("messages", []))
+
+    if failure == "fail500":
+        return JSONResponse({"error": "Traceback: KeyError at llm-node-7.internal:/srv/model.py line 88"}, status_code=500)
+    if failure == "rate429":
+        return JSONResponse({"error": {"message": "Rate limit reached for org-123", "type": "rate_limit"}}, status_code=429)
+    if failure in ("cutoff", "stall", "garbage"):
+        reply = REPLIES["ssn"]
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
@@ -77,9 +98,15 @@ async def chat_completions(request: Request):
             }))
 
         yield event({"role": "assistant", "content": ""})
-        for piece in split_into_chunks(reply, chunk_size):
+        for n, piece in enumerate(split_into_chunks(reply, chunk_size)):
             await asyncio.sleep(CHUNK_DELAY)
+            if failure == "garbage" and n == 3:
+                yield b"data: {this is not json\n\n"
+            if failure == "stall" and n == 4:
+                await asyncio.sleep(5)
             yield event({"content": piece})
+            if failure == "cutoff" and "123-4" in reply[: (n + 1) * chunk_size] and n * chunk_size >= reply.index("123-4"):
+                raise ConnectionResetError("simulated network failure mid-SSN")
         yield event({}, finish_reason="stop")
         yield sse("[DONE]")
 
