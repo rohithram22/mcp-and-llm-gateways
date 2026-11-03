@@ -43,6 +43,7 @@ class StreamRedactor:
         self._buffer = ""     # received but not yet released
         self._context = ""    # the last character already released (see _release)
         self.max_buffered = 0  # high-water mark, used to prove memory stays bounded
+        self.redactions = 0    # how many values were replaced (counted, never logged by value)
 
     def feed(self, text: str) -> str:
         """Add the next piece of text; return whatever is now safe to send (possibly "")."""
@@ -79,6 +80,7 @@ class StreamRedactor:
             start = max(start, 0)
             out.append(buffer[pos:start])
             out.append(REDACTED)
+            self.redactions += 1
             pos = end
         out.append(buffer[pos:cut])
 
