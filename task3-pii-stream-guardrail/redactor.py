@@ -6,7 +6,7 @@ Everything else waits in a small buffer until the next characters decide it.
 
 import re
 
-from patterns import REDACTED, find_pii
+from patterns import CARD_MAX_DIGITS, REDACTED, find_pii
 
 # The ambiguous tail of the buffer: text at the very end that the NEXT characters
 # could still turn into PII.
@@ -35,6 +35,15 @@ def hold_point(buffer: str) -> int:
     digits = TAIL_DIGITS.search(buffer)
     if digits:
         hold = min(hold, max(digits.start(), end - MAX_NUMBER_LEN))
+
+    # Never cut through a group of digits that could belong to a card: move the cut back
+    # to the start of the group. (A group longer than 19 digits can never be part of a
+    # card, so cutting inside one is harmless, and keeps memory bounded.)
+    group_start = hold
+    while 0 < group_start < end and buffer[group_start].isdigit() and buffer[group_start - 1].isdigit():
+        group_start -= 1
+    if hold - group_start <= CARD_MAX_DIGITS:
+        hold = group_start
     return hold
 
 
@@ -61,11 +70,14 @@ class StreamRedactor:
         if cut == 0:
             return ""
 
-        # Scan with one character of already-released text in front. The patterns'
-        # left fences (e.g. "not preceded by a digit") need to see that character,
-        # otherwise a match could wrongly start in the middle of a longer number.
-        offset = len(self._context)
-        findings = find_pii(self._context + buffer)
+        # Scan with the last released character in front, repeated. The patterns' left
+        # fences (e.g. "not preceded by a digit") need to see it, otherwise a match could
+        # wrongly start in the middle of a longer number. It is repeated past 19 so that,
+        # if the cut fell inside a very long number, the card search still sees a group
+        # too long to be a card, exactly as it would in the whole text.
+        prefix = self._context * (CARD_MAX_DIGITS + 1)
+        offset = len(prefix)
+        findings = find_pii(prefix + buffer)
 
         # Never cut through the middle of a match: if one straddles the cut, hold all of it.
         for f in findings:
