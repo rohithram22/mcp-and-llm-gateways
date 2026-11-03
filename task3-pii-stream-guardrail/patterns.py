@@ -25,12 +25,12 @@ SSN = re.compile(
     r"(?![\d-])"
 )
 
-# 13-19 digits, optionally separated by single spaces or dashes: 4111 1111 1111 1111, 3782-822463-10005
-CARD_CANDIDATE = re.compile(
-    r"(?<![\d-])"
-    r"\d(?:[ -]?\d){12,18}"
-    r"(?![\d-])"
-)
+# A run of digit groups separated by single spaces or dashes: "4111 1111 1111 1111", "Room 4 4111 ...".
+# Cards are searched INSIDE each run (see card_spans), because a stray number next to a card
+# ("Room 4 4111 1111 1111 1111") would otherwise make the whole run fail the Luhn check
+# and hide the real card.
+DIGIT_RUN = re.compile(r"\d+(?:[ -]\d+)*")
+CARD_MIN_DIGITS, CARD_MAX_DIGITS = 13, 19
 
 
 def luhn_valid(number: str) -> bool:
@@ -46,6 +46,38 @@ def luhn_valid(number: str) -> bool:
     return total % 10 == 0
 
 
+def card_spans(text: str) -> list["Finding"]:
+    """Card numbers: 13-19 consecutive digits, made of whole groups, passing Luhn.
+
+    Windows are built from whole groups, so a card is never carved out of the middle of a
+    longer unbroken number. Within a run, the longest valid window wins, left to right.
+    A window never exceeds 19 digits, so the work per group is bounded even for huge runs.
+    """
+    spans = []
+    for run in DIGIT_RUN.finditer(text):
+        groups = [(m.start() + run.start(), m.end() + run.start()) for m in re.finditer(r"\d+", run.group())]
+        i = 0
+        while i < len(groups):
+            # Collect every window starting at group i that is short enough to be a card.
+            windows, digits = [], 0
+            for j in range(i, len(groups)):
+                digits += groups[j][1] - groups[j][0]
+                if digits > CARD_MAX_DIGITS:
+                    break
+                if digits >= CARD_MIN_DIGITS:
+                    windows.append(j)
+            # Longest first: prefer the full card over a shorter Luhn-valid piece of it.
+            for j in reversed(windows):
+                start, end = groups[i][0], groups[j][1]
+                if luhn_valid(text[start:end]):
+                    spans.append(Finding("card", start, end))
+                    i = j + 1
+                    break
+            else:
+                i += 1
+    return spans
+
+
 @dataclass(frozen=True)
 class Finding:
     kind: str   # "email" | "ssn" | "card"
@@ -57,11 +89,7 @@ def find_pii(text: str) -> list[Finding]:
     """All PII spans in text, sorted, with overlaps merged so each character is redacted at most once."""
     found = [Finding("email", m.start(), m.end()) for m in EMAIL.finditer(text)]
     found += [Finding("ssn", m.start(), m.end()) for m in SSN.finditer(text)]
-    found += [
-        Finding("card", m.start(), m.end())
-        for m in CARD_CANDIDATE.finditer(text)
-        if luhn_valid(m.group())
-    ]
+    found += card_spans(text)
     found.sort(key=lambda f: (f.start, -f.end))
 
     merged: list[Finding] = []
