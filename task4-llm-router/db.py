@@ -29,6 +29,9 @@ CREATE TABLE IF NOT EXISTS token_usage (
 
 -- Makes "this tenant's rows newer than X" a fast index range scan instead of a full table scan.
 CREATE INDEX IF NOT EXISTS idx_usage_tenant_ts ON token_usage (tenant_id, ts);
+
+-- Makes "delete every row older than X" (eviction) fast too.
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON token_usage (ts);
 """
 
 
