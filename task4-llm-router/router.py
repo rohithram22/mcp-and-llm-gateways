@@ -14,6 +14,7 @@ backup too.
 import asyncio
 import logging
 import os
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 import httpx
@@ -56,8 +57,9 @@ class RouteResult:
     provider: str | None = None              # who answered (None if nobody did)
     status: int | None = None
     body: bytes | None = None                # non-streaming: the complete reply
-    first_chunk: bytes | None = None         # streaming: already-received first chunk...
-    response: httpx.Response | None = None   # ...and the open response to read the rest from
+    first_chunk: bytes | None = None         # streaming: the already-received first chunk,
+    chunks: AsyncIterator[bytes] | None = None  # the iterator yielding the rest,
+    response: httpx.Response | None = None   # and the open response, to close when done
     attempts: list[Attempt] = field(default_factory=list)
 
     @property
@@ -71,6 +73,7 @@ class _Reply:
     response: httpx.Response
     body: bytes | None = None
     first_chunk: bytes | None = None
+    chunks: AsyncIterator[bytes] | None = None
 
 
 async def _fetch(client: httpx.AsyncClient, provider: Provider, payload: dict, stream: bool) -> _Reply:
@@ -82,8 +85,10 @@ async def _fetch(client: httpx.AsyncClient, provider: Provider, payload: dict, s
             await response.aclose()
             return _Reply(response.status_code, response)
         if stream:
-            first = await anext(response.aiter_raw(), b"")
-            return _Reply(200, response, first_chunk=first)
+            # A response body can only be iterated once, so the SAME iterator is handed on.
+            chunks = response.aiter_raw()
+            first = await anext(chunks, b"")
+            return _Reply(200, response, first_chunk=first, chunks=chunks)
         body = await response.aread()
         await response.aclose()
         return _Reply(200, response, body=body)
@@ -127,6 +132,8 @@ async def _try(client: httpx.AsyncClient, provider: Provider, payload: dict, str
 
     try:
         reply = task.result()
+    except httpx.TimeoutException:
+        return attempt("timeout"), None
     except httpx.HTTPError as exc:
         log.warning("%s unreachable: %r", provider.name, exc)
         return attempt("unreachable"), None
@@ -138,7 +145,7 @@ async def _try(client: httpx.AsyncClient, provider: Provider, payload: dict, str
         return attempt(outcome, reply.status, reply.response.headers.get("retry-after")), None
 
     result = RouteResult(provider.name, 200, body=reply.body, first_chunk=reply.first_chunk,
-                         response=reply.response if stream else None)
+                         chunks=reply.chunks, response=reply.response if stream else None)
     return attempt("ok", 200), result
 
 
