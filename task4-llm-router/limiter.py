@@ -6,6 +6,7 @@ real usage, the reservation is SETTLED to the actual number, or RELEASED if no m
 answered. Rows older than the window no longer count and are deleted (eviction).
 """
 
+import asyncio
 import math
 import time
 from dataclasses import dataclass
@@ -97,3 +98,32 @@ class RateLimiter:
                 "SELECT COALESCE(SUM(tokens), 0) FROM token_usage WHERE tenant_id = ? AND ts > ?",
                 (tenant_id, self.clock() - self.window),
             ).fetchone()[0]
+
+    # ------------------------------------------------------------------ async API
+    # sqlite3 blocks: waiting for the write lock or the disk would freeze the event loop
+    # and every other request with it. These wrappers run each call on a worker thread.
+
+    async def areserve(self, tenant_id: str, limit: int, tokens: int) -> Decision:
+        work = asyncio.ensure_future(asyncio.to_thread(self.reserve, tenant_id, limit, tokens))
+        try:
+            # shield: if WE are cancelled (e.g. the client hung up), the worker thread cannot
+            # be stopped and may still commit a reservation. Don't lose track of it...
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            # ...refund it as soon as the thread finishes, so no tokens stay held by a
+            # request that no longer exists.
+            work.add_done_callback(self._release_orphan)
+            raise
+
+    def _release_orphan(self, work: "asyncio.Future[Decision]") -> None:
+        if work.cancelled() or work.exception() is not None:
+            return
+        decision = work.result()
+        if decision.allowed:
+            asyncio.ensure_future(asyncio.to_thread(self.release, decision.reservation_id))
+
+    async def asettle(self, reservation_id: int, actual_tokens: int) -> None:
+        await asyncio.shield(asyncio.to_thread(self.settle, reservation_id, actual_tokens))
+
+    async def arelease(self, reservation_id: int) -> None:
+        await asyncio.shield(asyncio.to_thread(self.release, reservation_id))
